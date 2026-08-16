@@ -12,7 +12,12 @@ FROM node:24-alpine AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
 COPY patches ./patches
-RUN npm ci --no-audit --no-fund
+# --ignore-scripts here too: `prepare` runs tsc, but tsconfig.json and src/ are
+# copied *after* this layer (deliberately — deps should cache independently of
+# source churn), so tsc would run with no project and exit non-zero. Skipping
+# scripts also skips patch-package's postinstall, hence the explicit call.
+RUN npm ci --no-audit --no-fund --ignore-scripts \
+ && npx patch-package
 COPY tsconfig.json ./
 COPY src ./src
 RUN npm run build
