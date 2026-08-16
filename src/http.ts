@@ -28,6 +28,7 @@ import { randomUUID, createHash, timingSafeEqual } from 'node:crypto';
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import express, { type Request, type Response, type NextFunction } from 'express';
 import dotenv from 'dotenv';
 
@@ -80,15 +81,38 @@ function bearerOk(header: string | undefined): boolean {
  * they unset a relation and are reversible. Only `*delete*` subcommands, which
  * destroy an entity, are refused. Vikunja has no trash and no undo.
  */
+/**
+ * Tools do not agree on what to call their operation field. An audit of every
+ * `z.enum` discriminator in src/tools found three distinct keys carrying
+ * delete values, spread across different tools:
+ *
+ *   subcommand  -> delete, bulk-delete, delete-share   (vikunja_tasks, ...)
+ *   operation   -> delete, bulk-delete                 (vikunja_task_crud, vikunja_task_bulk)
+ *   action      -> delete                              (vikunja_filters)
+ *
+ * Checking only `subcommand` — as the first version of this gate did — leaves
+ * vikunja_task_crud and vikunja_task_bulk completely ungated, which is exactly
+ * the pair that deletes tasks. `memberSubcommand` is included defensively: it
+ * is a discriminator today with no delete value, and adding it costs nothing.
+ *
+ * Matching is restricted to these keys rather than scanning all argument values
+ * so that free text — a task titled "delete the old server" — is not refused.
+ */
+const OPERATION_KEYS = ['subcommand', 'operation', 'action', 'memberSubcommand'] as const;
+
 function isBlockedDelete(body: unknown): string | null {
   if (ALLOW_DELETE || !body) return null;
   const calls = Array.isArray(body) ? body : [body];
   for (const call of calls) {
     const c = call as { method?: string; params?: { name?: string; arguments?: Record<string, unknown> } };
     if (c?.method !== 'tools/call') continue;
-    const sub = c.params?.arguments?.subcommand;
-    if (typeof sub === 'string' && sub.toLowerCase().includes('delete')) {
-      return `${c.params?.name ?? 'tool'}/${sub}`;
+    const args = c.params?.arguments;
+    if (!args) continue;
+    for (const key of OPERATION_KEYS) {
+      const value = args[key];
+      if (typeof value === 'string' && value.toLowerCase().includes('delete')) {
+        return `${c.params?.name ?? 'tool'}/${key}=${value}`;
+      }
     }
   }
   return null;
@@ -122,6 +146,36 @@ function buildServer(): McpServer {
 }
 
 const transports = new Map<string, StreamableHTTPServerTransport>();
+const lastSeen = new Map<string, number>();
+
+// The process runs under `restart: unless-stopped` and so effectively never
+// restarts. Sessions are only removed on an explicit close, so a client that
+// opens sessions without tearing them down would grow this map for the life of
+// the container. Both bounds below are deliberately generous — they are a
+// backstop against leaked sessions, not a usage limit.
+const MAX_SESSIONS = 64;
+const SESSION_IDLE_MS = 60 * 60 * 1000;
+
+function reapSessions(): void {
+  const cutoff = Date.now() - SESSION_IDLE_MS;
+  for (const [id, seen] of lastSeen) {
+    if (seen < cutoff) {
+      transports.get(id)?.close();
+      transports.delete(id);
+      lastSeen.delete(id);
+      logger.info(`Reaped idle MCP session: ${id}`);
+    }
+  }
+  // Still over the cap after reaping idle ones: drop the oldest.
+  while (transports.size > MAX_SESSIONS) {
+    const oldest = [...lastSeen.entries()].sort((a, b) => a[1] - b[1])[0]?.[0];
+    if (!oldest) break;
+    transports.get(oldest)?.close();
+    transports.delete(oldest);
+    lastSeen.delete(oldest);
+    logger.warn(`Evicted oldest MCP session (cap ${MAX_SESSIONS}): ${oldest}`);
+  }
+}
 
 async function main(): Promise<void> {
   await initShared();
@@ -174,6 +228,23 @@ async function main(): Promise<void> {
     const sessionId = req.headers['mcp-session-id'] as string | undefined;
     let transport = sessionId ? transports.get(sessionId) : undefined;
 
+    // Only an initialize request may create a session. Without this check, a
+    // client still sending a session id from before a restart (the map is
+    // in-memory) would make us build a fresh McpServer — dozens of zod tool
+    // registrations — on every request, only for the transport's own
+    // validateSession() to reject it moments later. Fail fast instead.
+    if (!transport && !isInitializeRequest(req.body)) {
+      res.status(400).json({
+        jsonrpc: '2.0',
+        error: {
+          code: -32000,
+          message: 'No valid session. Send an initialize request first.',
+        },
+        id: (req.body as { id?: unknown })?.id ?? null,
+      });
+      return;
+    }
+
     if (!transport) {
       transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
@@ -181,16 +252,21 @@ async function main(): Promise<void> {
         ...(ALLOWED_HOSTS.length > 0 ? { allowedHosts: ALLOWED_HOSTS } : {}),
         onsessioninitialized: (id: string) => {
           transports.set(id, transport as StreamableHTTPServerTransport);
+          lastSeen.set(id, Date.now());
           logger.info(`MCP session opened: ${id}`);
+          reapSessions();
         },
       });
       transport.onclose = (): void => {
         if (transport?.sessionId) {
           transports.delete(transport.sessionId);
+          lastSeen.delete(transport.sessionId);
           logger.info(`MCP session closed: ${transport.sessionId}`);
         }
       };
       await buildServer().connect(transport);
+    } else if (sessionId) {
+      lastSeen.set(sessionId, Date.now());
     }
     await transport.handleRequest(req, res, req.body);
   });
