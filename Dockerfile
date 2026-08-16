@@ -22,7 +22,15 @@ WORKDIR /app
 ENV NODE_ENV=production
 COPY package.json package-lock.json ./
 COPY patches ./patches
-RUN npm ci --omit=dev --no-audit --no-fund && npm cache clean --force
+# --ignore-scripts is required: the `prepare` lifecycle script runs `tsc`, which
+# is a devDependency and absent here, so a plain `npm ci --omit=dev` fails with
+# "Cannot find module .../typescript/bin/tsc". Skipping scripts also skips the
+# patch-package postinstall, so the patches are applied explicitly right after —
+# without this the runtime image would ship a client still calling Vikunja 0.24
+# endpoints.
+RUN npm ci --omit=dev --no-audit --no-fund --ignore-scripts \
+ && npx patch-package \
+ && npm cache clean --force
 COPY --from=build /app/dist ./dist
 # Drop root — nothing at runtime needs to write to disk.
 USER node
