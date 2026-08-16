@@ -1,0 +1,76 @@
+diff --git a/node_modules/node-vikunja/dist/esm/core/params.js b/node_modules/node-vikunja/dist/esm/core/params.js
+index 8cee4df..5cceab9 100644
+--- a/node_modules/node-vikunja/dist/esm/core/params.js
++++ b/node_modules/node-vikunja/dist/esm/core/params.js
+@@ -127,7 +127,9 @@ export function validateRequiredParams(endpoint, params, required) {
+  * Get parameter validation rules for common endpoints
+  */
+ export const ENDPOINT_VALIDATIONS = {
+-    '/tasks/all': {
++    // Vikunja 2.x renamed /tasks/all -> /tasks. Keyed on the new path so the
++    // param allow-list still matches; getProjectTasks now routes here too.
++    '/tasks': {
+         required: [],
+         optional: ['page', 'per_page', 's', 'sort_by', 'order_by', 'filter', 'filter_timezone', 'filter_include_nulls', 'expand'],
+     },
+diff --git a/node_modules/node-vikunja/dist/esm/services/task.service.js b/node_modules/node-vikunja/dist/esm/services/task.service.js
+index c5047ca..8cf8e77 100644
+--- a/node_modules/node-vikunja/dist/esm/services/task.service.js
++++ b/node_modules/node-vikunja/dist/esm/services/task.service.js
+@@ -14,7 +14,8 @@ export class TaskService extends VikunjaService {
+      * @returns List of tasks
+      */
+     async getAllTasks(params) {
+-        return this.request('/tasks/all', 'GET', undefined, {
++        // Vikunja 2.x renamed GET /tasks/all -> GET /tasks. The old path 404s.
++        return this.request('/tasks', 'GET', undefined, {
+             params: params,
+         });
+     }
+@@ -26,8 +27,23 @@ export class TaskService extends VikunjaService {
+      * @returns List of tasks
+      */
+     async getProjectTasks(projectId, params) {
+-        return this.request(`/projects/${projectId}/tasks`, 'GET', undefined, {
+-            params: params,
++        // Vikunja 2.x dropped GET /projects/{id}/tasks (that path is PUT-only
++        // now — it creates a task). Listing a project's tasks officially moved
++        // under views: GET /projects/{id}/views/{view}/tasks, which needs a view
++        // ID this signature does not have AND a separate token grant.
++        //
++        // GET /tasks?filter=project_id = N returns the same set, needs no view
++        // lookup, and works with a plain "Tasks -> Read All" grant. Verified
++        // against Vikunja 2.5.0: the views route 401s on a token without the
++        // views grant, while this returns the project's tasks.
++        const projectFilter = `project_id = ${projectId}`;
++        const merged = { ...(params || {}) };
++        // Preserve a caller-supplied filter by ANDing rather than clobbering it.
++        merged.filter = merged.filter
++            ? `(${merged.filter}) && ${projectFilter}`
++            : projectFilter;
++        return this.request('/tasks', 'GET', undefined, {
++            params: merged,
+         });
+     }
+     /**
+@@ -75,7 +91,9 @@ export class TaskService extends VikunjaService {
+      * @returns Updated task
+      */
+     async markTaskDone(taskId) {
+-        return this.request(`/tasks/${taskId}/done`, 'POST');
++        // Vikunja 2.x removed POST /tasks/{id}/done; done is now a field set
++        // through the normal task update. Verified on 2.5.0 (sets done_at).
++        return this.request(`/tasks/${taskId}`, 'POST', { id: taskId, done: true });
+     }
+     /**
+      * Mark a task as undone
+@@ -84,7 +102,8 @@ export class TaskService extends VikunjaService {
+      * @returns Updated task
+      */
+     async markTaskUndone(taskId) {
+-        return this.request(`/tasks/${taskId}/undone`, 'POST');
++        // See markTaskDone: POST /tasks/{id}/undone is gone in Vikunja 2.x.
++        return this.request(`/tasks/${taskId}`, 'POST', { id: taskId, done: false });
+     }
+     /**
+      * Get all assignees for a task

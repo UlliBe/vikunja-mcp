@@ -1,0 +1,13 @@
+node_modules
+dist
+coverage
+tests
+__mocks__
+docs
+test-*.js
+*-report.json
+final-dx-evaluation*
+simple-mcp-test.js
+task-creation-test.js
+.git
+.github

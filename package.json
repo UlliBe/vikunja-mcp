@@ -5,7 +5,8 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
-    "vikunja-mcp": "dist/index.js"
+    "vikunja-mcp": "dist/index.js",
+    "vikunja-mcp-http": "dist/http.js"
   },
   "files": [
     "dist/**/*",
@@ -29,7 +30,9 @@
     "version:patch": "npm version patch",
     "version:minor": "npm version minor",
     "version:major": "npm version major",
-    "test:mcp": "tsx scripts/test-mcp.ts"
+    "test:mcp": "tsx scripts/test-mcp.ts",
+    "postinstall": "patch-package",
+    "start:http": "node dist/http.js"
   },
   "keywords": [
     "mcp",
@@ -60,17 +63,20 @@
     "async-mutex": "^0.5.0",
     "better-sqlite3": "^12.4.1",
     "dotenv": "^17.2.3",
+    "express": "^5.1.0",
     "express-rate-limit": "^8.2.1",
     "jsonata": "^2.1.0",
     "node-vikunja": "^0.4.0",
     "object-sizeof": "^2.6.5",
     "opossum": "^9.0.0",
+    "patch-package": "^8.0.1",
     "tslib": "^2.8.1",
     "uuid": "^11.1.0",
     "zod": "^3.25.28"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.12",
+    "@types/express": "^5.0.6",
     "@types/jest": "^30.0.0",
     "@types/markdown-it": "^14.1.2",
     "@types/node": "^24.3.0",
